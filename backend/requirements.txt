@@ -1,0 +1,16 @@
+requests
+boto3
+dotenv
+pandas
+pathlib
+langchain
+google-generativeai
+pydantic
+snowflake-connector-python
+fastapi
+uvicorn
+pandas
+numpy
+plotly
+python-dotenv
+pydantic
