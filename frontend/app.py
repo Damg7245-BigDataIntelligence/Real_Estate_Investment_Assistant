@@ -122,7 +122,7 @@ def get_ai_response(message: str) -> Dict:
     try:
         with st.spinner("Thinking..."):
             response = requests.post(
-                "https://f8a3-155-33-132-19.ngrok-free.app/api/chat",
+                "https://8703-71-192-242-59.ngrok-free.app/api/chat",
                 json={
                     "message": message,
                     "state": st.session_state.state
@@ -141,7 +141,7 @@ def check_research_status():
     
     try:
         response = requests.get(
-            f"https://f8a3-155-33-132-19.ngrok-free.app/api/research/{st.session_state.research_task_id}",
+            f"https://8703-71-192-242-59.ngrok-free.app/api/research/{st.session_state.research_task_id}",
             timeout=10  # Add timeout to avoid hanging
         )
         
@@ -173,7 +173,7 @@ def check_research_status():
                     # Try one more time with a direct request
                     try:
                         fresh_response = requests.get(
-                            f"https://f8a3-155-33-132-19.ngrok-free.app/api/research/{st.session_state.research_task_id}?refresh=true",
+                            f"https://8703-71-192-242-59.ngrok-free.app/api/research/{st.session_state.research_task_id}?refresh=true",
                             timeout=15
                         )
                         if fresh_response.status_code == 200:
@@ -393,7 +393,7 @@ def main():
                 # Add a debug button to check research status
                 if st.button("🔍 Debug Report", key="debug_report"):
                     try:
-                        debug_response = requests.get("https://f8a3-155-33-132-19.ngrok-free.app/api/debug/research", timeout=10)
+                        debug_response = requests.get("https://8703-71-192-242-59.ngrok-free.app/api/debug/research", timeout=10)
                         debug_data = debug_response.json()
                         st.expander("Debug Information", expanded=True).json(debug_data)
                         
@@ -403,7 +403,7 @@ def main():
                                 st.info("Report found in debug data! Fetching...")
                                 # Fetch the report directly
                                 fetch_response = requests.get(
-                                    f"https://f8a3-155-33-132-19.ngrok-free.app/api/research/{st.session_state.research_task_id}?refresh=true",
+                                    f"https://8703-71-192-242-59.ngrok-free.app/api/research/{st.session_state.research_task_id}?refresh=true",
                                     timeout=15
                                 )
                                 if fetch_response.status_code == 200:
@@ -474,7 +474,7 @@ def main():
                 try:
                     # Make one final attempt with a longer timeout
                     final_response = requests.get(
-                        f"https://f8a3-155-33-132-19.ngrok-free.app/api/research/{st.session_state.research_task_id}?final=true",
+                        f"https://8703-71-192-242-59.ngrok-free.app/api/research/{st.session_state.research_task_id}?final=true",
                         timeout=20
                     )
                     if final_response.status_code == 200:
