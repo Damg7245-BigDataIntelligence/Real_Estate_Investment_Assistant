@@ -1,7 +1,5 @@
 import boto3
 import os
-from datetime import datetime
-import uuid
 from dotenv import load_dotenv
 
 load_dotenv()

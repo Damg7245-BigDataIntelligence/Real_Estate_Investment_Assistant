@@ -6,9 +6,9 @@ import snowflake.connector
 from dotenv import load_dotenv
 import os
 import json
-from state import ConversationState, UserPreferences
-from llm_service import LLMService
-from agents.query_agent import QueryAgent
+from backend.state import ConversationState, UserPreferences
+from backend.llm_service import LLMService
+from backend.query_agent import QueryAgent
 
 # Load environment variables
 load_dotenv()

@@ -2,7 +2,6 @@ import pandas as pd
 import snowflake.connector
 from dotenv import load_dotenv
 import os
-import numpy as np
 
 # Load environment variables
 load_dotenv()

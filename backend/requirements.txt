@@ -16,4 +16,9 @@ sentence_transformers
 google-search-results
 matplotlib
 seaborn
+dotenv
+praw
+regex
+nltk
+serpapi
 
