@@ -78,16 +78,16 @@ else:
     # Fallback to default load_dotenv behavior (searches current dir and parent dirs)
     load_dotenv()
     # Check if essential vars are loaded, otherwise print warning
-    if not os.getenv("SNOWFLAKE_ACCOUNT") or not os.getenv("GEMINI_API_KEY"):
+    if not os.getenv("SNOWFLAKE_ACCOUNT") or not os.getenv("GOOGLE_API_KEY"):
          print("Warning: .env file not found in project root or script directory, and essential env vars might be missing.")
     else:
          print("Loaded environment variables using default search.")
 
 
 # --- Gemini API Key ---
-GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
-    print("CRITICAL ERROR: GEMINI_API_KEY environment variable not found. Exiting.")
+    print("CRITICAL ERROR: GOOGLE_API_KEY environment variable not found. Exiting.")
     sys.exit(1)
 else:
     print("Gemini API Key found.")
@@ -99,15 +99,7 @@ SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
 SNOWFLAKE_ROLE = os.getenv("SNOWFLAKE_ROLE")
 SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE")
 SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE")
-SNOWFLAKE_SCHEMA = os.getenv("SNOWFLAKE_SCHEMA")
-
-essential_vars_sf = ["SNOWFLAKE_ACCOUNT", "SNOWFLAKE_USER", "SNOWFLAKE_PASSWORD", "SNOWFLAKE_ROLE", "SNOWFLAKE_WAREHOUSE", "SNOWFLAKE_DATABASE", "SNOWFLAKE_SCHEMA"]
-missing_vars_sf = [v for v in essential_vars_sf if not os.getenv(v)]
-if missing_vars_sf:
-    print(f"CRITICAL ERROR: Missing Snowflake environment variables: {', '.join(missing_vars_sf)}. Exiting.")
-    sys.exit(1)
-else:
-    print("Snowflake credentials found.")
+SNOWFLAKE_SCHEMA = "SUFFOLK_ANALYTICS_SCHEMA"
 
 # --- clean_sql Function ---
 def clean_sql(raw_sql):
@@ -394,15 +386,6 @@ def fetch_snowflake_df(query, query_description="Query"):
             print(f"{query_description} was not a SELECT/WITH query. Returning empty DataFrame.")
             return pd.DataFrame()
 
-    except snowflake.connector.errors.ProgrammingError as e:
-        # Specific Snowflake errors (syntax errors, permissions, object not found etc.)
-        print(f"!!! Snowflake Programming Error executing {query_description}: !!!")
-        print(f"    Snowflake Error Number: {e.errno}")
-        print(f"    SQLSTATE: {e.sqlstate}")
-        print(f"    Message: {e.msg}")
-        print(f"    Query: {query}")
-        print("!!! ------------------------------------------------------- !!!")
-        return None # Indicate failure
     except Exception as e:
         # General errors (network issues, unexpected problems)
         print(f"!!! General Error during Snowflake operation for {query_description}: {e} !!!")
@@ -1128,20 +1111,13 @@ if __name__ == "__main__":
     # --- Define Filters ---
     # Example filters - CHANGE THESE AS NEEDED
     filter_dict = {
-        "RegionName": "2108",       # Example: Zip code in San Francisco
+        "RegionName": "2129",       # Example: Zip code in San Francisco
         "City": "Boston",     # Example: City
         #"State": "CA"               # Optional: Might be needed if City/RegionName aren't unique nationwide
     }
     print("\n--- Using Filter Dictionary ---")
     print(json.dumps(filter_dict, indent=2))
     print("-------------------------------")
-
-    # --- Pre-run Checks --- (Performed near the top, ensure env vars are set)
-    if missing_vars_sf or not GOOGLE_API_KEY:
-        print("\n!!! CRITICAL ERROR: Essential environment variables missing. Please set them and retry. Exiting. !!!")
-        sys.exit(1)
-    else:
-        print("\n--- Environment Variables Verified ---")
 
     # --- Run Core Analysis ---
     insights = generate_snowflake_insights(filter_dict)

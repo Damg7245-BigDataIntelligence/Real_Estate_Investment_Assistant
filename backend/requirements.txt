@@ -1,6 +1,5 @@
 requests
 boto3
-dotenv
 pandas
 pathlib
 langchain
@@ -9,8 +8,12 @@ pydantic
 snowflake-connector-python
 fastapi
 uvicorn
-pandas
 numpy
 plotly
 python-dotenv
-pydantic
+pinecone[grpc]
+sentence_transformers
+google-search-results
+matplotlib
+seaborn
+

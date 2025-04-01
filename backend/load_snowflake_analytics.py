@@ -35,18 +35,18 @@ def snowflake_pipeline():
             with conn.cursor() as cur:
                 # Ensure warehouse, database, and schema exist; then use REAL_ESTATE_SCHEMA.
                 cur.execute("""
-                    CREATE WAREHOUSE IF NOT EXISTS REAL_ESTATE_WH
+                    CREATE WAREHOUSE IF NOT EXISTS BOSTON_REAL_ESTATE_WH
                     WAREHOUSE_SIZE = 'SMALL'
                     AUTO_SUSPEND = 60
                     AUTO_RESUME = TRUE;
                 """)
-                cur.execute("CREATE DATABASE IF NOT EXISTS REAL_ESTATE_DB;")
-                cur.execute("USE DATABASE REAL_ESTATE_DB;")
+                cur.execute("CREATE DATABASE IF NOT EXISTS SUFFOLK_REAL_ESTATE_DB;")
+                cur.execute("USE DATABASE SUFFOLK_REAL_ESTATE_DB;")
                 
                 # Create the schema if it doesn't exist
-                cur.execute("CREATE SCHEMA IF NOT EXISTS REAL_ESTATE_SCHEMA;")
-                cur.execute("USE SCHEMA REAL_ESTATE_SCHEMA;")
-                print("Snowflake warehouse, database, and schema REAL_ESTATE_SCHEMA ensured.")
+                cur.execute("CREATE SCHEMA IF NOT EXISTS SUFFOLK_ANALYTICS_SCHEMA;")
+                cur.execute("USE SCHEMA SUFFOLK_ANALYTICS_SCHEMA;")
+                print("Snowflake warehouse, database, and schema SUFFOLK_ANALYTICS_SCHEMA ensured.")
                 
                 # Create or replace file format for CSV.
                 cur.execute("""
