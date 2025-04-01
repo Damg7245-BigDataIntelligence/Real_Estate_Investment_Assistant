@@ -1,220 +1,115 @@
-from typing import Dict, List, Any
-from serpapi import GoogleSearch
 import os
+import asyncio
+from tavily import TavilyClient
 from dotenv import load_dotenv
-from datetime import datetime
-import json
-from backend.llm_response import generate_response_with_gemini 
+from urllib.parse import urlparse
+import sys
 
-# Load environment variables
-dotenv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", ".env"))
-load_dotenv(dotenv_path)
-SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY")
-print(SERPAPI_API_KEY)
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.append(project_root)
+
+from llm_response import generate_response_with_gemini
+
+load_dotenv()
+
+
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+TRUSTED_DOMAINS = {
+    "mass.gov", "cityofboston.gov", "census.gov", "bls.gov",
+    "bostonplans.org", "urban.org", "fred.stlouisfed.org", "boston.com",
+    "bizjournals.com", "masshousing.com", "bostonhousing.org"
+}
 
 class WebSearchAgent:
     def __init__(self):
-        self.api_key = SERPAPI_API_KEY
-        
-    def search_news(self, query: str, num_results: int = 5, boston_specific = "") -> List[Dict[str, Any]]:
-        """
-        Search for recent news articles about NVIDIA
-        """
-        print(f"Searching for news articles about {query}")
+        self.client = TavilyClient(TAVILY_API_KEY)
+
+    async def analyze_zipcode(self, zipcode: str):
         try:
-            if boston_specific:
-                nvidia_query = f"BOSTON real-estate: {query}"
-            else:
-                nvidia_query = f"USA real-estate: {query}"
-            search_params = {
-                "api_key": self.api_key,
-                "engine": "google",
-                "q": nvidia_query,
-                "num": num_results,
-                "tbm": "nws",  # News results
-                "tbs": "qdr:m",  # Last month's results
-                "location": "United States"
-            }
-            search = GoogleSearch(search_params)
-            results = search.get_dict()
-            
-            formatted_results = []
-            if "news_results" in results:
-                for item in results["news_results"]:
-                    formatted_results.append({
-                        "type": "news",
-                        "title": item.get("title", ""),
-                        "link": item.get("link", ""),
-                        "snippet": item.get("snippet", ""),
-                        "source": item.get("source", ""),
-                        "date": item.get("date", ""),
-                        "timestamp": datetime.now().isoformat()
-                    })
-            
-            return formatted_results
-            
-        except Exception as e:
-            print(f"Error in news search: {str(e)}")
-            return []
+            zipcode = str(zipcode).replace(".0", "").zfill(5)
 
-    def search_trends(self, query: str, num_results: int = 5, boston_specific = "") -> List[Dict[str, Any]]:
-        """
-        Search for general trends and articles about NVIDIA
-        """
-        try:
-            if boston_specific:
-                nvidia_query = f"BOSTON real-estate: {query} trends analysis research"
-            else:
-                nvidia_query = f"USA real-estate: {query} trends analysis research"
-            search_params = {
-                "api_key": self.api_key,
-                "engine": "google",
-                "q": nvidia_query,
-                "num": num_results,
-                "tbs": "qdr:m"  # Last month's results
-            }
-            
-            search = GoogleSearch(search_params)
-            results = search.get_dict()
-            
-            formatted_results = []
-            if "organic_results" in results:
-                for item in results["organic_results"]:
-                    formatted_results.append({
-                        "type": "trend",
-                        "title": item.get("title", ""),
-                        "link": item.get("link", ""),
-                        "snippet": item.get("snippet", ""),
-                        "source": item.get("source", "website"),
-                        "date": item.get("date", "Recent"),
-                        "timestamp": datetime.now().isoformat()
-                    })
-            
-            return formatted_results
-            
-        except Exception as e:
-            print(f"Error in trends search: {str(e)}")
-            return []
+            queries = [
+                f"Boston {zipcode} neighborhood development site:{' OR site:'.join(TRUSTED_DOMAINS)}",
+                f"{zipcode} Boston economic indicators housing employment site:{' OR site:'.join(TRUSTED_DOMAINS)}",
+                f"{zipcode} Boston population trends and demographics site:{' OR site:'.join(TRUSTED_DOMAINS)}",
+                f"{zipcode} Boston infrastructure transportation projects site:{' OR site:'.join(TRUSTED_DOMAINS)}",
+                f"{zipcode} real estate market outlook risks opportunities site:{' OR site:'.join(TRUSTED_DOMAINS)}"
+            ]
 
-    def process_results(self, news_results: List[Dict[str, Any]], trend_results: List[Dict[str, Any]], boston_specific = "") -> str:
-        """
-        Process and format both news and trend results into a comprehensive summary
-        """
-        if not news_results and not trend_results:
-            return "No relevant results found."
-            
-        if boston_specific:
-            summary = "Boston Real-Estate Intelligence Report:\n\n"
-        else:
-            summary = "USA Real-Estate Intelligence Report:\n\n"
-        
-        # Process News Section
-        if news_results:
-            summary += "📰 Latest News:\n" + "="*50 + "\n"
-            for i, result in enumerate(news_results, 1):
-                summary += f"{i}. {result['title']}\n"
-                summary += f"   📅 {result['date']} | 🔍 {result['source']}\n"
-                summary += f"   {result['snippet']}\n"
-                summary += f"   🔗 {result['link']}\n\n"
-        
-        # Process Trends Section
-        if trend_results:
-            summary += "\n📈 Market Trends & Analysis:\n" + "="*50 + "\n"
-            for i, result in enumerate(trend_results, 1):
-                summary += f"{i}. {result['title']}\n"
-                summary += f"   💡 Key Points: {result['snippet']}\n"
-                summary += f"   🔗 {result['link']}\n\n"
-        
-        # Add timestamp
-        summary += f"\n🕒 Report generated at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        
-        return summary
+            all_snippets = []
 
-    def synthesize_results(self, news_results: List[Dict], trend_results: List[Dict], boston_specific = "") -> str:
-        """
-        Create an analytical summary using Gemini based on news and trend snippets
-        """
-        # Prepare context from news and trends
-        news_context = "\n".join([
-            f"NEWS ARTICLE:\n"
-            f"Title: {item['title']}\n"
-            f"Date: {item['date']}\n"
-            f"Source: {item['source']}\n"
-            f"Summary: {item['snippet']}\n"
-            for item in news_results
-        ])
+            for query in queries:
+                try:
+                    results = self.client.search(
+                        query=query,
+                        search_depth="advanced",
+                        max_results=3,
+                        include_domains=list(TRUSTED_DOMAINS),
+                        exclude_domains=["realtor.com", "zillow.com", "redfin.com"]
+                    )
 
-        trends_context = "\n".join([
-            f"MARKET TREND:\n"
-            f"Title: {item['title']}\n"
-            f"Summary: {item['snippet']}\n"
-            for item in trend_results
-        ])
+                    for r in results.get("results", []):
+                        domain = urlparse(r["url"]).netloc.replace("www.", "")
+                        if domain in TRUSTED_DOMAINS and r.get("description"):
+                            all_snippets.append(f"{r['title']}\n{r['description']}\nSource: {r['url']}")
 
-        if boston_specific:
-            cntx="Boston Real-estate"
-        else:
-            cntx="USA Real-estate"
-        context = f"""
-        RECENT NEWS AND TRENDS ABOUT {cntx}:
+                except Exception as e:
+                    print(f"Error fetching Tavily results: {e}")
+                    continue
 
-        {news_context}
+            # Prepare final prompt for Gemini
+            combined_info = "\n\n".join(all_snippets[:10]) or "No data found."
 
-        MARKET TRENDS AND ANALYSIS:
-        {trends_context}
-        """
+            prompt = f"""
+            You are a real estate market analyst. Based on the information provided below for Boston ZIP code {zipcode},
+            create a detailed investment report covering:
 
-        # Use the new response_type parameter
-        analysis = generate_response_with_gemini(
-            query=f"Analyze {cntx} updates",
-            context=context,
-        )
-        
-        return analysis  
+            - Recent or upcoming development projects
+            - Local economic indicators (jobs, income, housing)
+            - Population and demographic changes
+            - Public infrastructure and transportation news
+            - Risks and opportunities in the real estate market
 
-    def run(self, query: str, boston_specific="") -> Dict[str, Any]:
-        """
-        Modified run method to include synthesis
-        """
-        try:
-            # Perform searches
-            news_results = self.search_news(query,boston_specific)
-            trend_results = self.search_trends(query,boston_specific)
-            
-            # Generate basic summary
-            summary = self.process_results(news_results, trend_results,boston_specific)
-            
-            # Generate analytical insights
-            insights = self.synthesize_results(news_results, trend_results, boston_specific)
-            
+            Rely on official, public, or local media data provided in the context.
+
+            Context:
+            {combined_info}
+            """
+
+            analysis = generate_response_with_gemini(prompt, context=combined_info)
+
+            # Return a dictionary instead of just the analysis string
             return {
-                "status": "success",
-                "summary": summary,
-                "insights": insights,  # New synthesized analysis
-                "raw_results": {
-                    "news": news_results,
-                    "trends": trend_results
+                "success": True,
+                "zipcode": zipcode,
+                "results": {
+                    "development_projects": all_snippets[:3],
+                    "market_trends": all_snippets[3:6]
                 },
-                "query": query,
-                "timestamp": datetime.now().isoformat(),
-                "categories": {
-                    "has_news": bool(news_results),
-                    "has_trends": bool(trend_results)
-                }
+                "analysis": analysis
             }
-            
+
         except Exception as e:
+            print(f"Error analyzing zipcode: {e}")
             return {
-                "status": "error",
+                "success": False,
                 "error": str(e),
-                "query": query,
-                "timestamp": datetime.now().isoformat()
-            } 
-        
-agent = WebSearchAgent()
-response = agent.run(query="real estate market", boston_specific="")
-print(response)
-print("---------------------------------------------")
-agent = WebSearchAgent()
-response = agent.run(query="real estate market", boston_specific="Boston")
-print(response)
+                "zipcode": zipcode,
+                "results": {
+                    "development_projects": [],
+                    "market_trends": []
+                },
+                "analysis": ""
+            }
+
+# --- Usage ---
+# async def run():
+#     agent = WebSearchAgent()
+#     zip_code = "02127"  # example ZIP
+#     result = await agent.analyze_zipcode(zip_code)
+#     print("\n====== INVESTMENT ANALYSIS ======\n")
+#     print(result)
+
+# if __name__ == "__main__":
+#     asyncio.run(run())

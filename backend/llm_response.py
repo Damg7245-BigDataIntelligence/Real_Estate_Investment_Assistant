@@ -10,7 +10,7 @@ def get_gemini_model():
     GOOGLE_API_KEY = os.getenv("GEMINI_API_KEY")
 
     genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel("gemini-1.5-pro-latest")
+    gemini_model = genai.GenerativeModel("gemini-1.5-pro")
 
     return gemini_model
 

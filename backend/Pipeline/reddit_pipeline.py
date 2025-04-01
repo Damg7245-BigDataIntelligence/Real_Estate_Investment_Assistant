@@ -1,15 +1,12 @@
 import praw
-import pandas as pd
 from dotenv import load_dotenv
 import os
 import datetime
 from backend.llm_response import reddit_select_titles
-from backend.Sentiment_Agent_Pipeline.Reddit_Pinecone import PineconeInsertion
-import regex as re
+from reddit_pinecone import PineconeInsertion
 
 # Load API credentials from .env file
-dotenv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", ".env"))
-load_dotenv(dotenv_path)
+load_dotenv()
 CLIENT_ID = os.getenv("RedditClientId")
 CLIENT_SECRET = os.getenv("RedditClientSecret")
 USER_AGENT = "RealEstateSentiment/1.0"  # Corrected user agent

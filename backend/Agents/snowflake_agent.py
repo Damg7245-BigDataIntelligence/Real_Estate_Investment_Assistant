@@ -7,41 +7,25 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from datetime import datetime
-import google.generativeai as genai
 from dotenv import load_dotenv
 import traceback
 import sys
 import json # Added for pretty printing dicts
+import google.generativeai as genai
+from backend.llm_response import generate_response_with_gemini
 
 # --- Path Setup ---
-# Determine script directory reliably
-try:
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-except NameError:
-    # Handle cases where __file__ is not defined (e.g., interactive environments)
-    script_dir = os.getcwd()
-    print(f"Warning: __file__ not defined. Using current working directory as script_dir: {script_dir}")
-
+script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, "..", ".."))
 
 # Add project root to sys.path if it's not already there
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-    print(f"Added project root to sys.path: {project_root}")
-elif script_dir not in sys.path:
-     # If project root was already there, maybe we need the script dir itself
-     sys.path.insert(0, script_dir)
-     print(f"Added script directory to sys.path: {script_dir}")
-
 
 # --- S3 Import / Dummy Function ---
 try:
-    # Adjust the import path based on your actual project structure
-    # Assuming s3_utils is in a 'backend' directory relative to the project root
     from backend.s3_utils import upload_visualization_to_s3
-    print("Successfully imported upload_visualization_to_s3 from backend.s3_utils")
 except ImportError as e:
-    print(f"Could not import from backend.s3_utils (Error: {e}). Using dummy function.")
     # Fallback dummy function for local execution/testing
     def upload_visualization_to_s3(image_data, prefix, filename="visualization.png"):
         """Saves visualization locally instead of uploading to S3."""
@@ -51,48 +35,22 @@ except ImportError as e:
         try:
             with open(local_path, "wb") as f:
                 f.write(image_data)
-            # Create a file URI
-            # Use os.path.abspath to ensure it works cross-platform
             abs_path = os.path.abspath(local_path)
-            # Replace backslashes for URI compatibility if needed (mostly for Windows)
             file_uri = f"file:///{abs_path.replace(os.sep, '/')}"
-            print(f"Simulated S3 upload. Saved visualization locally: {file_uri}")
             return file_uri
         except Exception as write_e:
-            print(f"Error saving dummy visualization locally to {local_path}: {write_e}")
+            print(f"Error saving visualization locally: {write_e}")
             return None
 
 # --- Load .env ---
-# Try loading from project root first
 dotenv_path_project = os.path.join(project_root, '.env')
-# Try loading from script directory if not found in project root
-dotenv_path_script = os.path.join(script_dir, '.env')
-
 if os.path.exists(dotenv_path_project):
     load_dotenv(dotenv_path=dotenv_path_project)
-    print(f"Loaded environment variables from project root: {dotenv_path_project}")
-elif os.path.exists(dotenv_path_script):
-    load_dotenv(dotenv_path=dotenv_path_script)
-    print(f"Loaded environment variables from script directory: {dotenv_path_script}")
 else:
-    # Fallback to default load_dotenv behavior (searches current dir and parent dirs)
     load_dotenv()
-    # Check if essential vars are loaded, otherwise print warning
-    if not os.getenv("SNOWFLAKE_ACCOUNT") or not os.getenv("GOOGLE_API_KEY"):
-         print("Warning: .env file not found in project root or script directory, and essential env vars might be missing.")
-    else:
-         print("Loaded environment variables using default search.")
 
 
-# --- Gemini API Key ---
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_API_KEY:
-    print("CRITICAL ERROR: GOOGLE_API_KEY environment variable not found. Exiting.")
-    sys.exit(1)
-else:
-    print("Gemini API Key found.")
-
-# --- Snowflake Credentials Check ---
+# --- Snowflake Credentials ---
 SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT")
 SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER")
 SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD")
@@ -108,6 +66,9 @@ def clean_sql(raw_sql):
     # Remove SQL comments
     sql_no_comments = re.sub(r'--.*$', '', raw_sql, flags=re.MULTILINE)
     sql_no_comments = re.sub(r'/\*.*?\*/', '', sql_no_comments, flags=re.DOTALL)
+    # Remove MySQL/Markdown style comments
+    sql_no_comments = re.sub(r'##.*$', '', sql_no_comments, flags=re.MULTILINE)
+    sql_no_comments = re.sub(r'#.*$', '', sql_no_comments, flags=re.MULTILINE)
     # Remove markdown code blocks
     cleaned = re.sub(r'^```sql\s*', '', sql_no_comments.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r'\s*```$', '', cleaned)
@@ -119,7 +80,13 @@ def clean_sql(raw_sql):
 def extract_and_clean_sql(gemini_response_text):
     """ Extracts TWO SQL queries from Gemini's response using '--- QUERY SEPARATOR ---'. """
     if not gemini_response_text:
-        print("Error: Received empty response text from Gemini.")
+        print("Error: Received empty response text from LLM.")
+        return None, None
+
+    # Check if it looks like we got a proper SQL response
+    if "SELECT" not in gemini_response_text.upper() and "WITH" not in gemini_response_text.upper():
+        print("Error: Response doesn't appear to contain SQL queries.")
+        print("Response content:", gemini_response_text[:100] + "..." if len(gemini_response_text) > 100 else gemini_response_text)
         return None, None
 
     separator = '--- QUERY SEPARATOR ---'
@@ -130,55 +97,60 @@ def extract_and_clean_sql(gemini_response_text):
         parts = gemini_response_text.split(separator, 1)
         query1_raw = parts[0]
         query2_raw = parts[1] if len(parts) > 1 else None
-        print(f"Split response using separator.")
     else:
         # Fallback: Try to find SQL blocks if separator is missing
-        print(f"Separator '{separator}' not found. Attempting to extract SQL using markdown.")
         sql_blocks = re.findall(r'```sql\s*(.*?)\s*```', gemini_response_text, re.DOTALL | re.IGNORECASE)
         if len(sql_blocks) >= 2:
-            print("Found 2 or more SQL blocks, using the first two.")
             query1_raw = "```sql\n" + sql_blocks[0] + "\n```" # Add backticks for clean_sql
             query2_raw = "```sql\n" + sql_blocks[1] + "\n```"
         elif len(sql_blocks) == 1:
-             print("Warning: Found only one SQL block.")
              query1_raw = "```sql\n" + sql_blocks[0] + "\n```"
         else:
-            print("Warning: Could not find separator or distinct SQL blocks.")
-            # As a last resort, assume the whole response might be the first query if it looks like SQL
-            temp_cleaned = clean_sql(gemini_response_text)
-            if temp_cleaned and (temp_cleaned.upper().startswith("SELECT") or temp_cleaned.upper().startswith("WITH")):
-                 print("Assuming the entire response might be Query 1.")
-                 query1_raw = gemini_response_text
+            # Split by double newlines and find chunks starting with SELECT or WITH
+            chunks = re.split(r'\n\s*\n', gemini_response_text)
+            sql_chunks = []
+            for chunk in chunks:
+                chunk = chunk.strip()
+                if chunk.upper().startswith("SELECT") or chunk.upper().startswith("WITH"):
+                    sql_chunks.append(chunk)
+            
+            if len(sql_chunks) >= 2:
+                query1_raw = sql_chunks[0]
+                query2_raw = sql_chunks[1]
+            elif len(sql_chunks) == 1:
+                query1_raw = sql_chunks[0]
             else:
-                 print("Could not reliably extract SQL queries.")
-                 return None, None
+                # As a last resort, assume the whole response might be the first query if it looks like SQL
+                temp_cleaned = clean_sql(gemini_response_text)
+                if temp_cleaned and (temp_cleaned.upper().startswith("SELECT") or temp_cleaned.upper().startswith("WITH")):
+                    query1_raw = gemini_response_text
+                else:
+                    return None, None
 
     query1 = clean_sql(query1_raw)
     query2 = clean_sql(query2_raw)
 
     # Validation
-    print(f"Cleaned Query 1 extracted: {'Yes' if query1 else 'No'}")
-    print(f"Cleaned Query 2 extracted: {'Yes' if query2 else 'No'}")
-
     if query1 and not (query1.upper().startswith("SELECT") or query1.upper().startswith("WITH")):
-        print(f"Warning: Query 1 does not start with SELECT or WITH. Invalidating. Content: {query1[:100]}...")
         query1 = None
     if query2 and not (query2.upper().startswith("SELECT") or query2.upper().startswith("WITH")):
-        print(f"Warning: Query 2 does not start with SELECT or WITH. Invalidating. Content: {query2[:100]}...")
         query2 = None
 
-    if not query1: print("Warning: Query 1 is invalid or was not extracted.")
-    if not query2: print("Warning: Query 2 is invalid or was not extracted.")
+    # Print queries for debugging
+    if query1:
+        print("Query 1:", query1) 
+    if query2:
+        print("Query 2:", query2)
 
     return query1, query2
 
 # --- fetch_snowflake_response (Query 2 compares City Averages for MULTIPLE metrics) ---
 def fetch_snowflake_response(filter_dict):
     """
-    Generates a prompt for Gemini to create TWO Snowflake SQL queries:
+    Generates a prompt for generating TWO Snowflake SQL queries:
     1. Yearly average trends for a specific region within a city.
     2. Overall average values for multiple metrics across several cities (including the specified one).
-    Sends the prompt to the Gemini API and returns the raw text response.
+    Uses the LLM response module to get the queries.
     """
     region = filter_dict.get("RegionName", "") # Specific region for query 1
     city = filter_dict.get("City", "")         # City filter for query 1 & base for query 2
@@ -187,14 +159,14 @@ def fetch_snowflake_response(filter_dict):
         print("Error: Missing 'RegionName' or 'City' in filter_dict for prompt generation.")
         return None
 
-    # Define table name and schema (replace if different)
+    # Define table name and schema 
     db_schema_table = f"{SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.MERGED_HOMEVALUES"
-    print(f"Using table: {db_schema_table} in prompt.")
 
     # Prompt asking for BOTH queries clearly separated
     prompt = f"""
     Generate TWO Snowflake SQL queries separated by '--- QUERY SEPARATOR ---'.
-    Provide ONLY the SQL code. Do NOT include comments (--, /* */), markdown formatting (like ```sql), or explanations.
+    Provide ONLY the SQL code. Do NOT include ANY comments or explanations before, during, or after the queries.
+    Do NOT include any markdown formatting like ```sql - only raw SQL.
     Use EXACT column names from the table, enclosed in double quotes (e.g., "RegionName").
 
     Table: {db_schema_table}
@@ -229,89 +201,33 @@ def fetch_snowflake_response(filter_dict):
     - End the query with a semicolon.
     """
 
-    print("\n--- Sending Prompt for TWO Queries (Specific Trend, Cross-City Multi-Metric Overall Avg) to Gemini ---")
-    # print("Prompt:\n", prompt) # Uncomment for debugging the prompt itself
-    print("----------------------------------------------------------------------------------------------------")
-
-    # Gemini API Call
-    genai.configure(api_key=GOOGLE_API_KEY)
-    gemini_model = genai.GenerativeModel("gemini-1.5-pro") # Or your preferred model
+    # Use generate_response_with_gemini instead of direct Gemini API call
     try:
-        # Configure safety settings to be less restrictive if needed, but monitor outputs
-        safety_settings = {
-            'HARM_CATEGORY_HARASSMENT': 'BLOCK_ONLY_HIGH',
-            'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_ONLY_HIGH',
-            'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_ONLY_HIGH',
-            'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_ONLY_HIGH',
-        }
-        generation_config = genai.types.GenerationConfig(
-            # candidate_count=1, # Default is 1
-            # stop_sequences=["--- QUERY SEPARATOR ---"], # Could try this, but might cut off second query
-            # max_output_tokens=1024, # Adjust if queries are very long
-            temperature=0.1 # Lower temperature for more deterministic SQL generation
+        print("Generating SQL queries with LLM...")
+        gemini_text = generate_response_with_gemini(
+            query="Generate SQL for real estate analysis",
+            context=prompt
         )
-
-        response = gemini_model.generate_content(
-            prompt,
-            generation_config=generation_config,
-            safety_settings=safety_settings
-        )
-
-        # Debugging the response object
-        # print("--- Gemini API Response Object ---")
-        # print(response)
-        # print("--------------------------------")
-
-        if response and response.candidates:
-             # Check if the response was blocked
-             if response.candidates[0].finish_reason.name != "STOP":
-                 print(f"Warning: Gemini response generation finished unexpectedly. Reason: {response.candidates[0].finish_reason.name}")
-                 # Try to access safety ratings if available
-                 try: print(f"Safety Ratings: {response.candidates[0].safety_ratings}")
-                 except (AttributeError, IndexError): pass
-
-             # Access the text content
-             if hasattr(response.candidates[0].content, 'parts') and response.candidates[0].content.parts:
-                 gemini_text = response.candidates[0].content.parts[0].text
-                 print("--- Gemini Raw Response Text ---")
-                 print(gemini_text)
-                 print("------------------------------")
-                 return gemini_text.strip()
-             else:
-                 print("Error: Gemini response structure unexpected or missing text content.")
-                 return None
-        elif response and response.prompt_feedback:
-             print(f"Warning: Gemini request blocked. Reason: {response.prompt_feedback.block_reason}")
-             print(f"Safety Ratings: {response.prompt_feedback.safety_ratings}")
-             return None
-        else:
-             print("Error: Gemini did not return a valid response or candidates list.")
-             print(f"Response Object: {response}") # Print the full object for debugging
-             return None
-
+        
+        if not gemini_text or len(gemini_text.strip()) < 20:
+            print("Error: LLM returned empty or very short response")
+            return None
+            
+        return gemini_text.strip()
     except Exception as e:
-        print(f"Error calling Gemini API: {e}")
-        print(traceback.format_exc())
+        print(f"Error generating SQL queries: {e}")
         return None
 
 # --- fetch_snowflake_df (Robust version) ---
 def fetch_snowflake_df(query, query_description="Query"):
-    """
-    Executes a single SQL query on Snowflake and returns a pandas DataFrame.
-    Returns None if connection or query execution fails.
-    Returns an empty DataFrame if the query runs but returns no rows.
-    """
+    """Executes SQL query and returns DataFrame with proper type conversion."""
     conn = None
     cur = None
 
-    print(f"\n--- Connecting to Snowflake for: {query_description} ---")
-    print(f"    Account: {SNOWFLAKE_ACCOUNT}, User: {SNOWFLAKE_USER}, Role: {SNOWFLAKE_ROLE}")
-    print(f"    Warehouse: {SNOWFLAKE_WAREHOUSE}, Database: {SNOWFLAKE_DATABASE}, Schema: {SNOWFLAKE_SCHEMA}")
-    print(f"--- Executing {query_description} ---")
-    print(query) # Print the exact query being executed
-    print(f"---------------------------------------")
-
     try:
+        print(f"Executing {query_description}...")
+        print("SQL:", query)
+        
         conn = snowflake.connector.connect(
             user=SNOWFLAKE_USER,
             password=SNOWFLAKE_PASSWORD,
@@ -320,85 +236,49 @@ def fetch_snowflake_df(query, query_description="Query"):
             warehouse=SNOWFLAKE_WAREHOUSE,
             database=SNOWFLAKE_DATABASE,
             schema=SNOWFLAKE_SCHEMA,
-            connect_timeout=60, # Increased timeout
+            connect_timeout=60,
             network_timeout=120
         )
-        print("Snowflake connection successful.")
         cur = conn.cursor()
 
         # Execute the query
         cur.execute(query)
-        print(f"{query_description} execution successful.")
-
-        # Check if it was a SELECT statement that might return rows
-        is_select_query = query.strip().upper().startswith(("SELECT", "WITH"))
-
-        if is_select_query:
-            if cur.rowcount == 0:
-                print(f"Warning: {query_description} returned no data (0 rows).")
-                # Still return an empty DataFrame with correct columns if possible
-                column_names = [col[0] for col in cur.description] if cur.description else []
-                return pd.DataFrame([], columns=column_names)
-            elif cur.description:
-                # Fetch results into a DataFrame
-                results = cur.fetchall()
-                column_names = [col[0] for col in cur.description] # Get column names in correct case
-                df = pd.DataFrame(results, columns=column_names)
-                print(f"Fetched {len(df)} rows for {query_description}.")
-
-                # --- Data Type Conversions (Important for Plotting/Analysis) ---
-                original_columns = df.columns.tolist() # Keep original case for messages
-                df_process = df.copy() # Work on a copy for processing
-                df_process.columns = df_process.columns.str.upper() # Standardize for processing
-
-                for col_upper, col_original in zip(df_process.columns, original_columns):
-                     # Convert potential numeric columns (averages, values)
-                     if col_upper.startswith('AVG_') or 'VALUE' in col_upper or col_upper.startswith('OVERALL_AVG_'):
-                         if col_upper in df_process: # Check if column exists
-                             try:
-                                 # Use errors='coerce' to turn invalid parsing into NaT/NaN
-                                 df_process[col_upper] = pd.to_numeric(df_process[col_upper], errors='coerce')
-                                 # Check if all values became NaN after conversion
-                                 if df_process[col_upper].isnull().all() and len(results) > 0 and df[col_original].notnull().any():
-                                    print(f"Warning: Column '{col_original}' contained non-numeric data and all values became NaN after conversion.")
-                             except Exception as e:
-                                 print(f"Warning: Could not convert column '{col_original}' to numeric: {e}")
-
-                     # Convert potential date/datetime columns
-                     elif 'DATE' in col_upper:
-                         if col_upper in df_process: # Check if column exists
-                             try:
-                                 df_process[col_upper] = pd.to_datetime(df_process[col_upper], errors='coerce')
-                                 if df_process[col_upper].isnull().all() and len(results) > 0 and df[col_original].notnull().any():
-                                    print(f"Warning: Column '{col_original}' contained non-date data and all values became NaT after conversion.")
-                             except Exception as e:
-                                 print(f"Warning: Could not convert column '{col_original}' to datetime: {e}")
-
-                # Assign processed data back with original column names
-                df_processed_original_cols = df_process.copy()
-                df_processed_original_cols.columns = original_columns
-                return df_processed_original_cols
-            else:
-                 print(f"Warning: {query_description} executed but did not return a description (no columns?). Returning empty DataFrame.")
-                 return pd.DataFrame()
-        else:
-            # For non-SELECT queries (like CREATE, INSERT - though not expected here)
-            print(f"{query_description} was not a SELECT/WITH query. Returning empty DataFrame.")
-            return pd.DataFrame()
+        
+        # Add debug prints
+        print(f"Query results before DataFrame conversion:")
+        print(f"Column names: {[col[0] for col in cur.description]}")
+        print(f"First few rows: {cur.fetchmany(3)}")
+        
+        # Create DataFrame with explicit dtypes
+        results = cur.fetchall()
+        column_names = [col[0] for col in cur.description]
+        
+        df = pd.DataFrame(results, columns=column_names)
+        
+        # Convert numeric columns
+        for col in df.columns:
+            if any(term in col.upper() for term in ['VALUE', 'AVG', 'PRICE']):
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+        # Convert date columns
+        for col in df.columns:
+            if 'DATE' in col.upper():
+                df[col] = pd.to_datetime(df[col], errors='coerce')
+                
+        return df
 
     except Exception as e:
         # General errors (network issues, unexpected problems)
-        print(f"!!! General Error during Snowflake operation for {query_description}: {e} !!!")
-        print(traceback.format_exc())
+        print(f"Error during Snowflake operation: {e}")
         return None # Indicate failure
     finally:
         # Ensure cursor and connection are closed
         if cur:
             try: cur.close()
-            except Exception as ce: print(f"Error closing cursor: {ce}")
+            except Exception: pass
         if conn:
-            try: conn.close(); print("Snowflake connection closed.")
-            except Exception as ce: print(f"Error closing connection: {ce}")
+            try: conn.close()
+            except Exception: pass
 
 # --- create_and_save_graph (Handles specific region trend AND cross-city GROUPED BAR chart) ---
 def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
@@ -415,7 +295,6 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
         list: A list of dictionaries, each containing info about a saved visualization (url, type, title, columns). Returns empty list on failure or no data.
     """
     if df is None or df.empty:
-        print(f"Info: No data provided for visualization type: {query_type}. Skipping graph generation.")
         return []
 
     visualizations = []
@@ -432,51 +311,34 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
     filters_str_region = f"(City: {city_filter}, Region: {region_filter})"
     filters_str_city = f"(City: {city_filter} & Others)"
 
-
-    print(f"\n--- Attempting Graph Type: '{query_type}' ---")
-    print(f"    Input DataFrame Columns (Standardized): {df_plot.columns.tolist()}")
-
     plt.style.use('seaborn-v0_8-darkgrid') # Use a visually appealing style
 
     try:
         # === GRAPH 1: Single Region Yearly Time Series ===
         if query_type == 'single_region_trend':
-            print("Processing 'single_region_trend' visualization...")
             # Identify potential date/time column (assuming only one)
             date_col = next((c for c in df_plot.columns if 'DATE' in c), None)
             # Identify potential average value columns
             numeric_cols = sorted([c for c in df_plot.columns if c.startswith('AVG_')]) # Sort for consistent plot order
 
-            if not date_col:
-                print("Error: No date column found (expected column name containing 'DATE'). Cannot create time series plot.")
+            if not date_col or not numeric_cols:
                 return []
-            if not numeric_cols:
-                 print("Error: No average value columns found (expected columns starting with 'AVG_'). Cannot create time series plot.")
-                 return []
-
-            print(f"    Using Date Column: {date_col}")
-            print(f"    Using Numeric Columns: {numeric_cols}")
 
             # Ensure date column is datetime type
             if not pd.api.types.is_datetime64_any_dtype(df_plot[date_col]):
-                 print(f"    Converting column '{date_col}' to datetime...")
-                 df_plot[date_col] = pd.to_datetime(df_plot[date_col], errors='coerce')
+                df_plot[date_col] = pd.to_datetime(df_plot[date_col], errors='coerce')
 
             # Ensure numeric columns are numeric type
             valid_numeric_cols = []
             for col in numeric_cols:
                 if not pd.api.types.is_numeric_dtype(df_plot[col]):
-                    print(f"    Converting column '{col}' to numeric...")
                     df_plot[col] = pd.to_numeric(df_plot[col], errors='coerce')
                 # Check if conversion resulted in all NaNs which means the original data was bad
                 if not df_plot[col].isnull().all():
                     valid_numeric_cols.append(col)
-                else:
-                    print(f"    Warning: Column '{col}' is all NaN after numeric conversion. Skipping.")
 
             if not valid_numeric_cols:
-                 print("Error: No valid numeric data available after conversion. Cannot create time series plot.")
-                 return []
+                return []
 
             # Drop rows where date is invalid (NaT) or *all* valid numeric columns are NaN
             df_plot_cleaned = df_plot.dropna(subset=[date_col], how='any')
@@ -484,10 +346,8 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
             df_plot_cleaned = df_plot_cleaned.sort_values(by=date_col) # Ensure data is sorted by date
 
             if df_plot_cleaned.empty:
-                print("Warning: DataFrame is empty after removing rows with invalid dates or missing numeric data. No plot generated.")
                 return []
 
-            print(f"    Generating plot with {len(df_plot_cleaned)} data points...")
             plt.figure(figsize=(12, 6))
             plot_title = f"Yearly Average Home Value Trend {filters_str_region}"
             ylabel = "Average Value ($)"
@@ -522,10 +382,8 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
                 plt.close() # Close plot to free memory
 
                 filename = f"yearly_trend_single_region_{timestamp}.png"
-                print(f"    Saving visualization '{filename}'...")
                 url = upload_visualization_to_s3(buffer.getvalue(), viz_folder, filename)
                 if url:
-                    print(f"    Visualization saved successfully: {url}")
                     # Find original column names corresponding to the ones used
                     original_date_col = original_columns[df_plot.columns.to_list().index(date_col)]
                     original_num_cols = [original_columns[df_plot.columns.to_list().index(c)] for c in valid_numeric_cols]
@@ -535,28 +393,17 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
                         "title": plot_title,
                         "columns": [original_date_col] + original_num_cols # Report original columns used
                     })
-                else:
-                    print(f"    Error: Upload/Save failed for {filename}")
             else:
-                print("Warning: No valid data series were plotted for single region trend.")
                 plt.close()
 
         # === GRAPH 2: Cross-City Overall Average Grouped Bar Chart ===
         elif query_type == 'cross_city_comparison':
-            print("Processing 'cross_city_comparison' visualization...")
             # Identify city column and overall average columns
             city_col = 'CITY' # Assuming the column name is 'CITY' (standardized to upper)
             value_cols = sorted([c for c in df_plot.columns if c.startswith('OVERALL_AVG_')])
 
-            if city_col not in df_plot.columns:
-                 print(f"Error: City column '{city_col}' not found in DataFrame. Cannot create comparison plot.")
-                 return []
-            if not value_cols:
-                 print("Error: No overall average value columns found (expected columns starting with 'OVERALL_AVG_'). Cannot create comparison plot.")
-                 return []
-
-            print(f"    Using City Column: {city_col}")
-            print(f"    Using Value Columns: {value_cols}")
+            if city_col not in df_plot.columns or not value_cols:
+                return []
 
             # Select relevant columns and create a working copy
             df_clean = df_plot[[city_col] + value_cols].copy()
@@ -565,38 +412,31 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
             valid_value_cols = []
             for col in value_cols:
                 if not pd.api.types.is_numeric_dtype(df_clean[col]):
-                    print(f"    Converting column '{col}' to numeric...")
                     df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
                 if not df_clean[col].isnull().all():
                      valid_value_cols.append(col)
-                else:
-                     print(f"    Warning: Column '{col}' is all NaN after conversion. Skipping.")
 
             if not valid_value_cols:
-                 print("Error: No valid numeric data available in value columns. Cannot create comparison plot.")
-                 return []
+                return []
 
             # Drop rows where city is missing or *all* valid value columns are NaN
             df_clean.dropna(subset=[city_col], inplace=True)
             df_clean.dropna(subset=valid_value_cols, how='all', inplace=True)
 
             if df_clean.empty:
-                print("Warning: DataFrame is empty after cleaning. No comparison plot generated.")
                 return []
 
             # Melt the dataframe for easy plotting with seaborn's grouped bar chart
-            print("    Melting DataFrame for grouped bar plot...")
             df_melted = pd.melt(df_clean,
-                                id_vars=[city_col],
-                                value_vars=valid_value_cols, # Use only valid cols
-                                var_name='Metric',
-                                value_name='Average Value')
+                               id_vars=[city_col],
+                               value_vars=valid_value_cols, # Use only valid cols
+                               var_name='Metric',
+                               value_name='Average Value')
 
             # Remove rows where the specific metric's average value is null (important after melt)
             df_melted.dropna(subset=['Average Value'], inplace=True)
 
             if df_melted.empty:
-                print("Warning: DataFrame is empty after melting and removing NaN values. No comparison plot generated.")
                 return []
 
             # Clean up metric names for the legend
@@ -604,10 +444,8 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
 
             # Determine plot size based on number of cities and metrics
             num_cities = df_clean[city_col].nunique()
-            num_metrics = len(valid_value_cols)
             fig_width = max(8, num_cities * 1.5) # Adjust width based on cities
             fig_height = 6 + num_cities * 0.1   # Adjust height slightly
-            print(f"    Plotting {num_metrics} metrics across {num_cities} cities...")
 
             # --- Plotting ---
             plt.figure(figsize=(fig_width, fig_height))
@@ -640,10 +478,8 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
             plt.close()
 
             filename = f"overall_avg_cross_city_grouped_{timestamp}.png"
-            print(f"    Saving visualization '{filename}'...")
             url = upload_visualization_to_s3(buffer.getvalue(), viz_folder, filename)
             if url:
-                print(f"    Visualization saved successfully: {url}")
                 # Find original column names corresponding to the ones used
                 original_city_col = original_columns[df_plot.columns.to_list().index(city_col)]
                 original_value_cols = [original_columns[df_plot.columns.to_list().index(c)] for c in valid_value_cols]
@@ -653,17 +489,11 @@ def create_and_save_graph(df, query_type, timestamp, metadata_filters=None):
                     "title": plot_title,
                     "columns": [original_city_col] + original_value_cols # Report original columns used
                 })
-            else:
-                print(f"    Error: Upload/Save failed for {filename}")
-
-        else:
-            print(f"Warning: No specific visualization logic defined for query type '{query_type}'.")
 
         return visualizations
 
     except Exception as e:
-        print(f"!!! Error occurred during visualization generation for type '{query_type}': {e} !!!")
-        print(traceback.format_exc())
+        print(f"Error during visualization generation: {e}")
         plt.close() # Ensure plot is closed even if error occurs
         return [] # Return empty list indicating failure
 
@@ -936,35 +766,161 @@ def generate_data_summary(filters, single_region_df, cross_city_comp_df):
 
     return "\n".join(summary_lines)
 
+# --- Direct SQL Query Templates ---
+def get_fixed_query_templates(filter_dict):
+    """
+    Returns fixed SQL query templates with parameters filled in from filter_dict.
+    No LLM calls, just direct string formatting for predictable queries.
+    
+    Args:
+        filter_dict (dict): Dictionary containing 'City' and 'RegionName' for filtering
+        
+    Returns:
+        tuple: (single_region_query, cross_city_query)
+    """
+    region = filter_dict.get("RegionName", "")
+    city = filter_dict.get("City", "")
+    
+    if not region or not city:
+        print("Error: Missing 'RegionName' or 'City' in filter_dict.")
+        return None, None
+    
+    # Define table name and schema 
+    db_schema_table = f"{SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.MERGED_HOMEVALUES"
+    
+    # QUERY 1: Single Region Yearly Trend
+    single_region_query = f"""
+    SELECT 
+        DATE_TRUNC('YEAR', "Date") AS "YEAR_START_DATE",
+        AVG(TRY_TO_NUMBER("1Bed_HomeValue")) AS "AVG_1BED",
+        AVG(TRY_TO_NUMBER("2Bed_HomeValue")) AS "AVG_2BED",
+        AVG(TRY_TO_NUMBER("3Bed_HomeValue")) AS "AVG_3BED",
+        AVG(TRY_TO_NUMBER("MA_Single_Family_HomeValues")) AS "AVG_SFR"
+    FROM {db_schema_table}
+    WHERE "RegionName" = '{region}' AND "City" = '{city}'
+    GROUP BY "YEAR_START_DATE"
+    ORDER BY "YEAR_START_DATE" ASC;
+    """
+    
+    # QUERY 2: Cross-City Comparison with CTE
+    cross_city_query = f"""
+    WITH SampleCities AS (
+        SELECT '{city}' AS "City"
+        UNION 
+        SELECT DISTINCT "City" FROM {db_schema_table}
+        WHERE "City" != '{city}'
+        LIMIT 4
+    )
+    SELECT 
+        m."City",
+        AVG(TRY_TO_NUMBER("1Bed_HomeValue")) AS "OVERALL_AVG_1BED",
+        AVG(TRY_TO_NUMBER("2Bed_HomeValue")) AS "OVERALL_AVG_2BED",
+        AVG(TRY_TO_NUMBER("3Bed_HomeValue")) AS "OVERALL_AVG_3BED",
+        AVG(TRY_TO_NUMBER("MA_Single_Family_HomeValues")) AS "OVERALL_AVG_SFR"
+    FROM {db_schema_table} AS m
+    INNER JOIN SampleCities s ON m."City" = s."City"
+    GROUP BY m."City"
+    ORDER BY "OVERALL_AVG_SFR" DESC;
+    """
+    
+    return single_region_query, cross_city_query
 
-# --- generate_snowflake_insights (Runs TWO queries & generates TWO graphs) ---
+# --- Vision Analysis for Graph Interpretation ---
+def analyze_visualization_with_gemini(visualization_urls, filter_dict):
+    """Uses Gemini Pro Vision to analyze visualizations."""
+    if not visualization_urls:
+        return "No visualizations available for analysis."
+        
+    try:
+        import requests
+        
+        # Get API key
+        GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+        if not GEMINI_API_KEY:
+            return "Error: GEMINI_API_KEY not found in environment variables."
+            
+        # Configure Gemini
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # Extract context for prompt
+        city = filter_dict.get("City", "Unknown City")
+        region = filter_dict.get("RegionName", "Unknown Region")
+        
+        # Prepare prompt
+        prompt = f"""
+        Analyze these real estate market visualizations for {city} (region: {region}).
+        Focus on:
+        1. Key trends in home values
+        2. Market position comparison
+        3. Property type performance
+        4. Notable patterns or anomalies
+        
+        Provide analysis in clear, concise bullet points.
+        """
+        
+        # Process each visualization
+        all_analyses = []
+        for viz_info in visualization_urls:
+            url = viz_info.get("url")
+            if url and url.startswith("http"):
+                try:
+                    # Download image
+                    response = requests.get(url, timeout=10)
+                    if response.status_code == 200:
+                        # Generate content with image
+                        response = genai.GenerativeModel(model_name="gemini-2.0-flash-exp").generate_content(
+                            [
+                                prompt,
+                                {"mime_type": "image/png", "data": response.content}  # Use dictionary format
+                            ]
+                        )
+                        all_analyses.append(response.text)
+                except Exception as e:
+                    print(f"Error processing visualization {url}: {e}")
+                    continue
+        
+        if not all_analyses:
+            return "Could not analyze any visualizations."
+            
+        # Combine all analyses
+        combined_analysis = "\n\n".join([
+            f"### Analysis {i+1}\n{analysis}" 
+            for i, analysis in enumerate(all_analyses)
+        ])
+        
+        return combined_analysis
+        
+    except Exception as e:
+        print(f"Error in visualization analysis: {e}")
+        return f"Error analyzing visualizations: {str(e)}"
+
+# --- generate_snowflake_insights (Main function) ---
 def generate_snowflake_insights(filter_dict):
     """
     Main orchestrator function:
-    1. Fetches TWO SQL queries from Gemini (specific region trend, cross-city multi-metric avg).
-    2. Extracts and cleans the SQL queries.
-    3. Executes both queries against Snowflake.
-    4. Generates visualizations for both results (time series and grouped bar chart).
-    5. Generates a combined textual summary.
-    6. Packages the results (summary, visualization URLs, raw data sample).
+    1. Uses fixed SQL templates instead of LLM-generated queries
+    2. Executes both queries against Snowflake
+    3. Generates visualizations for both results
+    4. Generates a combined textual summary
+    5. Optional visual analysis using Gemini Vision
+    6. Packages the results
     """
-    print(f"--- Starting Insight Generation for Filters: {filter_dict} ---")
     start_time = datetime.now()
 
     # Validate essential filters
     if not filter_dict.get("RegionName") or not filter_dict.get("City"):
-        print("Error: 'RegionName' and 'City' must be provided in the filter_dict.")
+        print("Error: Missing required filters (RegionName, City).")
         return {"summary": "Error: Missing required filters (RegionName, City).", "visualizations": [], "raw_data_sample": []}
 
-    # 1. Get Queries from Gemini
-    print("\nStep 1: Fetching SQL Queries from Gemini...")
-    gemini_sql_response = fetch_snowflake_response(filter_dict)
-    if not gemini_sql_response:
-        return {"summary": "Error: Failed to generate SQL queries via Gemini API.", "visualizations": [], "raw_data_sample": []}
-
-    # 2. Extract/Clean Queries
-    print("\nStep 2: Extracting and Cleaning SQL Queries...")
-    single_region_query, cross_city_query = extract_and_clean_sql(gemini_sql_response)
+    # 1. Get SQL queries from templates (no LLM involved)
+    try:
+        single_region_query, cross_city_query = get_fixed_query_templates(filter_dict)
+        if not single_region_query or not cross_city_query:
+            print("Error: Failed to generate SQL query templates.")
+            return {"summary": "Error: Failed to generate SQL query templates.", "visualizations": [], "raw_data_sample": []}
+    except Exception as e:
+        print(f"Unexpected error during SQL template generation: {str(e)}")
+        return {"summary": f"Error generating SQL templates: {str(e)}", "visualizations": [], "raw_data_sample": []}
 
     # Initialize results
     single_region_df = None
@@ -976,114 +932,87 @@ def generate_snowflake_insights(filter_dict):
     error_flag_cross = False
     error_messages = [] # Collect specific error notes
 
-    # 3. Execute Query 1 (Single Region Trend)
-    print("\nStep 3: Executing Query 1 (Single Region Trend)...")
-    if single_region_query:
+    # 2. Execute Query 1 (Single Region Trend)
+    try:
         single_region_df = fetch_snowflake_df(single_region_query, "Single Region Trend Query")
         if single_region_df is None:
-            print("!!! Single Region query failed during execution. !!!")
             error_messages.append("Execution failed for the specific region trend query.")
             error_flag_single = True
         elif single_region_df.empty:
-            print("Query successful, but no data returned for the specific region trend.")
             error_messages.append("No data found for the specific region trend query filters.") # Note no data
             # It's not an error, but summary needs to reflect it.
         else:
-            print(f"Single Region Trend query successful ({len(single_region_df)} rows).")
             # Generate visualization only if data is present
-            print("\nStep 3b: Generating Single Region Trend Visualization...")
             vis1 = create_and_save_graph(single_region_df, 'single_region_trend', timestamp, filter_dict)
             visualizations.extend(vis1)
-    else:
-        print("Skipping Single Region Query (Invalid or not extracted).")
-        error_messages.append("The specific region trend query was invalid or could not be extracted.")
+    except Exception as e:
+        error_messages.append(f"Error executing region trend query: {str(e)}")
         error_flag_single = True
+        print(f"Error executing region trend query: {str(e)}")
 
-    # 4. Execute Query 2 (Cross-City Comparison)
-    print("\nStep 4: Executing Query 2 (Cross-City Comparison)...")
-    if cross_city_query:
+    # 3. Execute Query 2 (Cross-City Comparison)
+    try:
         cross_city_df = fetch_snowflake_df(cross_city_query, "Cross-City Comparison Query")
         if cross_city_df is None:
-            print("!!! Cross-City query failed during execution. !!!")
             error_messages.append("Execution failed for the cross-city comparison query.")
             error_flag_cross = True
         elif cross_city_df.empty:
-            print("Query successful, but no data returned for the cross-city comparison.")
             error_messages.append("No data found for the cross-city comparison query filters.") # Note no data
-            # Not an error, but summary needs to reflect it.
         else:
-            print(f"Cross-City Comparison query successful ({len(cross_city_df)} rows).")
             # Generate visualization only if data is present
-            print("\nStep 4b: Generating Cross-City Comparison Visualization...")
             vis2 = create_and_save_graph(cross_city_df, 'cross_city_comparison', timestamp, filter_dict)
             visualizations.extend(vis2)
-    else:
-        print("Skipping Cross-City Query (Invalid or not extracted).")
-        error_messages.append("The cross-city comparison query was invalid or could not be extracted.")
+    except Exception as e:
+        error_messages.append(f"Error executing cross-city comparison query: {str(e)}")
         error_flag_cross = True
+        print(f"Error executing cross-city comparison query: {str(e)}")
 
-    # 5. Generate Combined Summary
-    print("\nStep 5: Generating Combined Data Summary...")
-    # Pass the DFs regardless of whether they are None, empty, or populated
-    summary = generate_data_summary(filter_dict, single_region_df, cross_city_df)
-
+    # 4. Generate data-based summary
+    try:
+        # Pass the DFs regardless of whether they are None, empty, or populated
+        print(f"Single Region DataFrame: {single_region_df}")
+        print(f"Cross City DataFrame: {cross_city_df}")
+        numeric_summary = generate_data_summary(filter_dict, single_region_df, cross_city_df)
+    except Exception as e:
+        print(f"Error generating numeric summary: {str(e)}")
+        numeric_summary = f"Error generating numeric summary: {str(e)}"
+        if not error_messages:  # Only add this if no other errors
+            error_messages.append(f"Error generating numeric summary: {str(e)}")
+    
+    # 5. Generate visual analysis if enabled and we have visualizations
+    vision_analysis = None
+    use_vision_analysis = filter_dict.get("use_vision_analysis", False)
+    
+    if use_vision_analysis and visualizations:
+        try:
+            print("Analyzing visualizations with Gemini Vision...")
+            vision_analysis = analyze_visualization_with_gemini(visualizations, filter_dict)
+        except Exception as e:
+            print(f"Error during visualization analysis: {e}")
+            vision_analysis = f"Error analyzing visualizations: {str(e)}"
+    
+    # Combine summaries
+    if vision_analysis:
+        summary = f"{numeric_summary}\n\n## Visualization Analysis\n\n{vision_analysis}"
+    else:
+        summary = numeric_summary
+    
     # Prepend error/status notes to summary if any issues occurred or no data found
     if error_messages:
          error_prefix = "### Important Notes on Data Availability:\n" + "\n".join([f"- {msg}" for msg in error_messages]) + "\n\n---\n\n"
          summary = error_prefix + summary
 
-    # 6. Prepare Raw Data Sample (from single region if available)
-    print("\nStep 6: Preparing Raw Data Sample...")
-    raw_data_sample = []
-    sample_df_source = single_region_df # Prioritize sampling from the trend data
-
-    if sample_df_source is not None and not sample_df_source.empty:
-        try:
-            # Take head, convert specific columns to handle potential complex types for JSON
-            sample_df_display = sample_df_source.head(5).copy()
-            # Convert datetime to string for JSON compatibility if present
-            for col in sample_df_display.select_dtypes(include=['datetime64[ns]', 'datetime64[ns, UTC]', 'datetimetz']).columns:
-                 try:
-                      sample_df_display[col] = sample_df_display[col].dt.strftime('%Y-%m-%d')
-                 except AttributeError: # Handle potential NaT or other issues
-                      sample_df_display[col] = sample_df_display[col].astype(str)
-
-            # Convert decimals or other numerics that might not be JSON native
-            for col in sample_df_display.select_dtypes(include=['number']).columns:
-                 # Check for numpy types specifically if needed, otherwise just round or convert to float
-                 # Convert to standard Python float, handling potential Pandas dtypes
-                 sample_df_display[col] = sample_df_display[col].apply(lambda x: float(x) if pd.notna(x) else None)
-
-
-            # Handle potential Pandas specific types like Period
-            for col in sample_df_display.select_dtypes(include=['period']).columns:
-                 sample_df_display[col] = sample_df_display[col].astype(str)
-
-            raw_data_sample = sample_df_display.to_dict(orient="records")
-            print(f"    Prepared sample of {len(raw_data_sample)} rows from single region data.")
-        except Exception as e:
-            print(f"    Warning: Error converting sample data to dictionary: {e}")
-            # Attempt to get basic string representation if complex conversion fails
-            try:
-                 raw_data_sample = [row.to_dict() for index, row in sample_df_source.head(5).iterrows()]
-                 print("    Used basic row iteration for sample data due to conversion error.")
-            except Exception as e2:
-                 print(f"    Fallback sample data conversion also failed: {e2}")
-                 raw_data_sample = [{"Error": "Could not format sample data."}]
-
-    else:
-        print("    No data available from single region query to provide a sample.")
-
-
     # 7. Final Result Packaging
     end_time = datetime.now()
     duration = end_time - start_time
-    print(f"\n--- Insight Generation Complete (Duration: {duration}) ---")
+    print(f"Completed in {duration.total_seconds():.2f} seconds")
 
     # Determine status based on DataFrame content (None=Fail, Empty=NoData, Populated=Success)
     status_region = "Failed" if error_flag_single else "No Data" if single_region_df is not None and single_region_df.empty else "Success" if single_region_df is not None else "Skipped/Invalid"
     status_comp = "Failed" if error_flag_cross else "No Data" if cross_city_df is not None and cross_city_df.empty else "Success" if cross_city_df is not None else "Skipped/Invalid"
 
+    # Extract raw data samples
+    raw_data_sample = extract_raw_data_sample(single_region_df, cross_city_df)
 
     result = {
         "summary": summary,
@@ -1095,86 +1024,52 @@ def generate_snowflake_insights(filter_dict):
             "duration_seconds": round(duration.total_seconds(), 2),
             "region_query_status": status_region,
             "comparison_query_status": status_comp,
-            "gemini_model_used": "gemini-1.5-pro" # Or fetch dynamically if needed
+            "error_messages": error_messages if error_messages else None,
+            "vision_analysis_used": vision_analysis is not None
         }
     }
     return result
 
-# =============================================
-# Main execution block
-# =============================================
-if __name__ == "__main__":
-    print("===================================================")
-    print("          Starting Real Estate Analysis            ")
-    print("===================================================")
-
-    # --- Define Filters ---
-    # Example filters - CHANGE THESE AS NEEDED
-    filter_dict = {
-        "RegionName": "2129",       # Example: Zip code in San Francisco
-        "City": "Boston",     # Example: City
-        #"State": "CA"               # Optional: Might be needed if City/RegionName aren't unique nationwide
+def extract_raw_data_sample(single_region_df, cross_city_df, max_rows=5):
+    """Extract sample data from both DataFrames for debugging/display."""
+    sample_data = {
+        "single_region_trend": None,
+        "cross_city_comparison": None
     }
-    print("\n--- Using Filter Dictionary ---")
-    print(json.dumps(filter_dict, indent=2))
-    print("-------------------------------")
+    
+    if single_region_df is not None and not single_region_df.empty:
+        sample_data["single_region_trend"] = single_region_df.head(max_rows).to_dict('records')
+        print(f"Single Region Trend Sample Data: {sample_data['single_region_trend']}")
+    if cross_city_df is not None and not cross_city_df.empty:
+        sample_data["cross_city_comparison"] = cross_city_df.head(max_rows).to_dict('records')
+        print(f"Cross City Comparison Sample Data: {sample_data['cross_city_comparison']}")
+        
+    return sample_data
 
-    # --- Run Core Analysis ---
-    insights = generate_snowflake_insights(filter_dict)
+# # =============================================
+# # Main execution block
+# # =============================================
+# if __name__ == "__main__":
+#     print("===== Real Estate Analysis =====")
 
-    # --- Print Results ---
-    print("\n\n========= ANALYSIS RESULTS =========")
+#     # --- Define Filters ---
+#     filter_dict = {
+#         "RegionName": "2129",  # Zip code in Boston
+#         "City": "Boston",      # City
+#     }
+#     print(f"Filter: {filter_dict}")
 
-    print("\n--- Metadata ---")
-    if insights.get("metadata"):
-        print(json.dumps(insights["metadata"], indent=2))
-    else:
-        print("No metadata generated.")
+#     # --- Run Analysis ---
+#     insights = generate_snowflake_insights(filter_dict)
 
-    print("\n--- Summary ---")
-    print(insights.get("summary", "No summary generated."))
-
-    print("\n--- Visualizations ---")
-    if insights.get("visualizations"):
-        print(f"Generated {len(insights['visualizations'])} visualization(s):")
-        for i, viz in enumerate(insights["visualizations"]):
-            print(f"  {i+1}. Type:  {viz.get('type','N/A')}")
-            print(f"     Title: {viz.get('title','N/A')}")
-            print(f"     URL:   {viz.get('url','N/A')}")
-            # Ensure columns is a list before joining
-            columns_list = viz.get('columns', [])
-            if isinstance(columns_list, list):
-                print(f"     Cols:  {', '.join(map(str, columns_list))}")
-            else:
-                print(f"     Cols:  {columns_list}") # Print as is if not a list
-    else:
-        print("No visualizations were generated or saved.")
-
-    print("\n--- Raw Data Sample (First 5 Rows Max from Specific Region Trend) ---")
-    if insights.get("raw_data_sample"):
-        sample_data = insights["raw_data_sample"]
-        if isinstance(sample_data, list) and len(sample_data) > 0 and isinstance(sample_data[0], dict):
-             # Check for error message case
-             if "Error" in sample_data[0]:
-                 print(sample_data[0]["Error"])
-             else:
-                 try:
-                     # Use pandas for nice table formatting if available
-                     print(pd.DataFrame(sample_data).to_string(index=False, na_rep='NaN')) # Display NaN clearly
-                 except ImportError:
-                     # Fallback to JSON printing if pandas is not installed
-                     print(json.dumps(sample_data, indent=2))
-                 except Exception as e:
-                      print(f"Error formatting sample data with pandas: {e}")
-                      print(json.dumps(sample_data, indent=2)) # Fallback print
-        elif isinstance(sample_data, list) and len(sample_data) == 0:
-             print("Sample data list is empty.")
-        else: # Unexpected format
-             print("Sample data is empty or in an unexpected format.")
-             print(sample_data) # Print what was received
-    else:
-        print("No raw data sample available (likely due to query failure or no data).")
-
-    print("\n==========================================")
-    print("              Analysis Finished             ")
-    print("==========================================")
+#     # --- Display Results ---
+#     print("\n=== ANALYSIS RESULTS ===")
+#     print(f"- Visualizations: {len(insights.get('visualizations', []))}")
+#     if insights.get('visualizations'):
+#         for i, viz in enumerate(insights['visualizations']):
+#             print(f"  {i+1}. {viz.get('type')}: {viz.get('url')}")
+    
+#     print(f"- Data Sample Rows: {len(insights.get('raw_data_sample', []))}")
+#     print(f"- Execution Time: {insights.get('metadata', {}).get('duration_seconds', 0):.2f} seconds")
+#     print("\n=== End of Analysis ===")
+#     print("Insights: ", insights)

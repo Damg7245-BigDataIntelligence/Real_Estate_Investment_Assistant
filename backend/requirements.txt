@@ -24,3 +24,16 @@ serpapi
 langgraph
 langchain
 langchain-google-genai
+tavily-python
+beautifulsoup4
+aiohttp
+langgraph
+langchain
+langchain-google-genai
+webdriver-manager
+PyMuPDF
+chardet
+fake-useragent
+cloudscraper
+playwright
+

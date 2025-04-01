@@ -1,38 +1,34 @@
-
-import pandas as pd
 from dotenv import load_dotenv
 import os
-import datetime
-import regex as re
 from pinecone import Pinecone
 from sentence_transformers import SentenceTransformer
 from backend.llm_response import reddit_generate_report
-
+ 
 def pinecone_init():
     dotenv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../..", ".env"))
     load_dotenv(dotenv_path)
-    PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
-
+    PINECONE_API_KEY = os.getenv("PINECONE_API_KEY_REDDIT")
+ 
     # Initialize Pinecone
     pc = Pinecone(api_key=PINECONE_API_KEY)
     index_name = "real-estate-assistant"
-
+ 
     index = pc.Index(index_name)
     model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
     print(index.describe_index_stats())
     return index, model
-
-def search_reddit_rag(input_info, top_k=20):
+ 
+def search_pinecone_db(input_info, top_k=20):
     """Search for relevant chunks in Pinecone, filtering by multiple years and quarters, and generate a response using Gemini."""
     index, model = pinecone_init()
     queries = {
-        "## Market Trends & Pricing Analysis": 
+        "## Market Trends & Pricing Analysis":
             f"What are the current price trends for {input_info['Property Type']} properties in Boston?",
-        "## Neighborhood Insights & Budget Match": 
+        "## Neighborhood Insights & Budget Match":
             f"Which neighborhoods in Boston match a budget between {input_info['Budget Min']} and {input_info['Budget Max']}?",
-        "## Investment Strategies & Expert Advice": 
+        "## Investment Strategies & Expert Advice":
             f"What investment strategies are recommended for {input_info['Investment Goal']} in Boston?",
-        "## Demographic Suitability": 
+        "## Demographic Suitability":
             f"Which Boston areas fit the demographic preference of {input_info['Demographic preference']}?"
     }
     print(input_info)
@@ -49,7 +45,7 @@ def search_reddit_rag(input_info, top_k=20):
                 include_metadata=True,
                 namespace="reddit"
             )
-
+ 
             matches = results.get("matches", [])
             if not matches:
                 print("No relevant matches found for the given year-quarter combinations.")
@@ -74,15 +70,3 @@ def search_reddit_rag(input_info, top_k=20):
             print(f"Error during search: {e}")
             return "Error occurred during search."
     print(report_md)
-    
-
-input_info = {
-    "Property Type": "Apartment",
-    "Budget Min": 500000,
-    "Budget Max": 1000000,
-    "Investment Goal": "Long-term rental income",
-    "Demographic preference": "Young professionals"
-}
-
-# Call the function
-search_reddit_rag(input_info)

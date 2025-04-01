@@ -2,7 +2,13 @@ from typing import Dict, Any, List, Tuple
 import snowflake.connector
 import os
 from dotenv import load_dotenv
-from backend.Agents.gemini_visualization_agent import GeminiVisualizationAgent
+import sys
+
+# Add the project root directory to Python path
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+sys.path.append(project_root)
+
+from backend.agents.gemini_visualization_agent import GeminiVisualizationAgent
 
 class PropertyListingsAgent:
     def __init__(self):
@@ -31,8 +37,13 @@ class PropertyListingsAgent:
                 - Dictionary with count of listings per zip code
         """
         try:
+            print("Getting property listings for zip codes")
+            # Remove .0 from zip codes for listings query
+            clean_zip_codes = [zip_code.replace('.0', '') for zip_code in zip_codes]
+            
             # Format zip codes for SQL IN clause
-            zip_codes_str = ", ".join(f"'{zip_code}'" for zip_code in zip_codes)
+            zip_codes_str = ", ".join(f"'{zip_code}'" for zip_code in clean_zip_codes)
+            print("zip_codes_str", zip_codes_str)
             
             # First, get count of listings per zip code
             count_query = f"""
@@ -42,8 +53,7 @@ class PropertyListingsAgent:
                 FROM LISTINGS
                 WHERE "RegionName" IN ({zip_codes_str})
                 GROUP BY "RegionName";
-            """
-            
+            """ 
             # SQL query to fetch all properties for given zip codes
             listings_query = f"""
                 SELECT 
@@ -59,7 +69,8 @@ class PropertyListingsAgent:
                     "Date"
                 FROM LISTINGS
                 WHERE "RegionName" IN ({zip_codes_str})
-                ORDER BY "Price" ASC;
+                ORDER BY "Price" ASC
+                LIMIT 10;
             """
             
             # Connect to Snowflake and execute queries
@@ -87,28 +98,13 @@ class PropertyListingsAgent:
                     # Print summary
                     print("\nListing Summary:")
                     print("-" * 80)
-                    for zip_code in zip_codes:
+                    for zip_code in clean_zip_codes:
                         count = zip_code_counts.get(zip_code, 0)
                         status = f"{count} listings found" if count > 0 else "No listings available"
                         print(f"ZIP Code {zip_code}: {status}")
                     print("-" * 80)
                     
-                    if zip_codes_no_listings:
-                        print("\nWarning: No listings found for the following ZIP codes:")
-                        print(", ".join(zip_codes_no_listings))
-                    
-                    if listings:
-                        print(f"\nFound total of {len(listings)} properties")
-                        for listing in listings:
-                            print("\nProperty Details:")
-                            print(f"Address: {listing['Address']}, {listing['City']}, {listing['StateName']} {listing['ZipCode']}")
-                            print(f"Price: ${listing['Price']}")
-                            print(f"Specs: {listing['Beds']} beds, {listing['Baths']} baths, {listing['Sqft']} sqft")
-                            print(f"Listing URL: {listing['Url']}")
-                            print(f"Listed Date: {listing['Date']}")
-                            print("-" * 80)
-                    else:
-                        print("\nNo listings found for any of the provided ZIP codes.")
+                    print(f"\nFound total of {len(listings)} properties")
                     
                     return listings, zip_code_counts
                     
@@ -124,12 +120,13 @@ class PropertyListingsAgent:
             zip_codes (List[str]): List of ZIP codes to fetch properties for
             
         Returns:
-            Dict[str, Any]: Dictionary containing listings, summary, and visualization URL
+            Dict[str, Any]: Dictionary containing listings, summary, and visualization URLs
         """
         try:
             # Get the listings first
             listings, zip_counts = self.get_property_listings(zip_codes)
-            
+            print("listings", listings)
+            print("zip_counts", zip_counts)
             if not listings:
                 return {
                     "success": False,
@@ -150,7 +147,7 @@ class PropertyListingsAgent:
                 "message": "Analysis completed successfully",
                 "listings": listings,
                 "summary": summary,
-                "visualization": visualization_result,  # Now includes both URL and description
+                "visualization": visualization_result,  # Now includes both URLs and description
                 "zip_counts": zip_counts
             }
             
@@ -163,18 +160,3 @@ class PropertyListingsAgent:
                 "summary": None,
                 "visualization": None
             }
-
-if __name__ == "__main__":
-    agent = PropertyListingsAgent()
-    # Test with mix of valid and invalid zip codes
-    zip_codes = ["2118", "2128", "2134"]  # 99999 is an invalid zip code
-    result = agent.get_property_listings_with_analysis(zip_codes)
-
-    if result["success"]:
-        print("\nVisualization URL:", result["visualization"]["url"])
-        print("\nDetailed Analysis:")
-        print(result["summary"])
-        print("\nListings found:", len(result["listings"]))
-        print("ZIP code distribution:", result["zip_counts"])
-    else:
-        print("Error:", result["message"])
