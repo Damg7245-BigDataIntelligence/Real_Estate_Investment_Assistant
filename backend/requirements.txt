@@ -21,4 +21,6 @@ praw
 regex
 nltk
 serpapi
-
+langgraph
+langchain
+langchain-google-genai

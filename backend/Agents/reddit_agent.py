@@ -22,7 +22,7 @@ def pinecone_init():
     print(index.describe_index_stats())
     return index, model
 
-def search_pinecone_db(input_info, top_k=20):
+def search_reddit_rag(input_info, top_k=20):
     """Search for relevant chunks in Pinecone, filtering by multiple years and quarters, and generate a response using Gemini."""
     index, model = pinecone_init()
     queries = {
@@ -85,4 +85,4 @@ input_info = {
 }
 
 # Call the function
-search_pinecone_db(input_info)
+search_reddit_rag(input_info)

@@ -1,4 +1,4 @@
-from pinecone_manager import RealEstateVectorDB
+from backend.Pipeline.pinecone_manager import RealEstateVectorDB
 import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')

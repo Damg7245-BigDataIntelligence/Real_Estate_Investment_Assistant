@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Any, List
 from dotenv import load_dotenv
-from pinecone_manager import RealEstateVectorDB
+from backend.Pipeline.pinecone_manager import RealEstateVectorDB
 import pandas as pd
 import asyncio
 

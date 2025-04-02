@@ -1,6 +1,6 @@
 from typing import Dict, Any
 from llm_service import LLMService
-from state import UserPreferences
+from backend.state import UserPreferences
 
 class QueryAgent:
     def __init__(self):

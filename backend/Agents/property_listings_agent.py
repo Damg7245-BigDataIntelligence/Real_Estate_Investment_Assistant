@@ -2,7 +2,7 @@ from typing import Dict, Any, List, Tuple
 import snowflake.connector
 import os
 from dotenv import load_dotenv
-from gemini_visualization_agent import GeminiVisualizationAgent
+from backend.Agents.gemini_visualization_agent import GeminiVisualizationAgent
 
 class PropertyListingsAgent:
     def __init__(self):
